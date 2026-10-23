@@ -1,0 +1,138 @@
+import express from 'express';
+import Comment from '../models/Comment.js';
+import Task from '../models/Task.js';
+import Project from '../models/Project.js';
+import ProjectMember from '../models/ProjectMember.js';
+import User from '../models/User.js';
+import { protect } from '../middleware/auth.js';
+
+const router = express.Router();
+
+const canReadProject = async (userId, projectId) => {
+  const user = await User.findById(userId);
+  if (user?.role === 'admin') return true;
+
+  const project = await Project.findById(projectId);
+  if (!project) return false;
+
+  if (project.owner.toString() === userId.toString()) return true;
+
+  return !!(await ProjectMember.findOne({ projectId, userId }));
+};
+
+router.get('/task/:taskId/comments', protect, async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.taskId);
+    if (!task || task.isDeleted) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Task not found' }
+      });
+    }
+
+    const allowed = await canReadProject(req.user._id, task.projectId);
+    if (!allowed) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'You cannot view comments for this task' }
+      });
+    }
+
+    const comments = await Comment.find({ taskId: task._id }).populate('userId', '-passwordHash').sort({ createdAt: -1 });
+    return res.status(200).json({
+      success: true,
+      data: comments,
+      message: 'Comments fetched successfully'
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 'SERVER_ERROR', message: error.message }
+    });
+  }
+});
+
+router.post('/task/:taskId/comments', protect, async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.taskId);
+    if (!task || task.isDeleted) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Task not found' }
+      });
+    }
+
+    const allowed = await canReadProject(req.user._id, task.projectId);
+    if (!allowed) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'You cannot comment on this task' }
+      });
+    }
+
+    const { content } = req.body;
+    if (!content || !content.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'Comment content is required' }
+      });
+    }
+
+    const comment = await Comment.create({
+      taskId: task._id,
+      projectId: task.projectId,
+      userId: req.user._id,
+      content: content.trim()
+    });
+
+    return res.status(201).json({
+      success: true,
+      data: comment,
+      message: 'Comment created successfully'
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 'SERVER_ERROR', message: error.message }
+    });
+  }
+});
+
+router.delete('/comments/:commentId', protect, async (req, res) => {
+  try {
+    const comment = await Comment.findById(req.params.commentId);
+    if (!comment) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Comment not found' }
+      });
+    }
+
+    const task = await Task.findById(comment.taskId);
+    const user = await User.findById(req.user._id);
+    const isOwner = comment.userId.toString() === req.user._id.toString();
+    const isAdmin = user.role === 'admin';
+    const isPm = user.role === 'project_manager';
+
+    if (!isOwner && !isAdmin && !isPm) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'You cannot delete this comment' }
+      });
+    }
+
+    await comment.deleteOne();
+    return res.status(200).json({
+      success: true,
+      data: { taskId: task?._id || comment.taskId },
+      message: 'Comment deleted successfully'
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 'SERVER_ERROR', message: error.message }
+    });
+  }
+});
+
+export default router;
